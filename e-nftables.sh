@@ -1,8 +1,12 @@
 #!/bin/bash
 
 # =================================================================
-#           Nftables 转发 (NAT 网关) TUI 管理面板 (v2.0)
+#           Nftables 转发 (NAT 网关) TUI 管理面板 (v2.1)
 # =================================================================
+#
+# v2.1 更新:
+#   - 添加规则时, 协议默认为 'both' (TCP+UDP)
+#   - 'both' 选项会自动添加两条规则
 #
 # v2.0 更新:
 #   - 将 DNAT 规则存储在 /etc/nft_menu_dnat.rules 中
@@ -147,13 +151,16 @@ do_save() {
 }
 
 # [ 5. 傻瓜式 - 添加规则 ]
+# --- (v2.1) ---
 do_add_rule() {
     echo "--- 添加新的 DNAT 规则 ---"
     
-    read -p "协议 (tcp/udp) [默认: tcp]: " proto
-    [[ -z "$proto" ]] && proto="tcp"
-    if [[ "$proto" != "tcp" && "$proto" != "udp" ]]; then
-        echo -e "\e[31m错误: 协议必须是 tcp 或 udp。\e[0m"
+    read -p "协议 (tcp, udp, both) [默认: both]: " proto
+    [[ -z "$proto" ]] && proto="both" # 默认值为 both
+    
+    # 校验输入
+    if [[ "$proto" != "tcp" && "$proto" != "udp" && "$proto" != "both" ]]; then
+        echo -e "\e[31m错误: 协议必须是 tcp, udp, 或 both。\e[0m"
         return 1
     fi
     
@@ -177,18 +184,39 @@ do_add_rule() {
         return 1
     fi
     
-    local new_rule="$proto:$ext_port:$int_ip:$int_port"
     echo "---"
-    read -p "您要添加的规则: $new_rule [Y/n]: " confirm
-    if [[ "$confirm" == "y" || "$confirm" == "Y" || "$confirm" == "" ]]; then
-        # 保存到规则文件
-        echo "$new_rule" >> "$DNAT_RULES_FILE"
-        echo "✅ 规则已保存到 $DNAT_RULES_FILE"
-        echo "请 '重启转发' (选项3) 或 '启动转发' (选项1) 来应用新规则。"
+    
+    # 根据 'proto' 变量处理规则
+    if [[ "$proto" == "both" ]]; then
+        # 处理 'both' (TCP + UDP)
+        local new_rule_tcp="tcp:$ext_port:$int_ip:$int_port"
+        local new_rule_udp="udp:$ext_port:$int_ip:$int_port"
+        
+        read -p "您要添加 [TCP] 和 [UDP] 两条规则吗? [Y/n]: " confirm
+        if [[ "$confirm" == "y" || "$confirm" == "Y" || "$confirm" == "" ]]; then
+            echo "$new_rule_tcp" >> "$DNAT_RULES_FILE"
+            echo "$new_rule_udp" >> "$DNAT_RULES_FILE"
+            echo "✅ [TCP] 和 [UDP] 规则已保存到 $DNAT_RULES_FILE"
+        else
+            echo "操作已取消。"
+        fi
+        
     else
-        echo "操作已取消。"
+        # 处理 'tcp' 或 'udp'
+        local new_rule="$proto:$ext_port:$int_ip:$int_port"
+        
+        read -p "您要添加的规则: $new_rule [Y/n]: " confirm
+        if [[ "$confirm" == "y" || "$confirm" == "Y" || "$confirm" == "" ]]; then
+            echo "$new_rule" >> "$DNAT_RULES_FILE"
+            echo "✅ 规则已保存到 $DNAT_RULES_FILE"
+        else
+            echo "操作已取消。"
+        fi
     fi
+    
+    echo "请 '重启转发' (选项3) 或 '启动转发' (选项1) 来应用新规则。"
 }
+# --- (v2.1 结束) ---
 
 # [ 6. 傻瓜式 - 删除规则 ]
 do_delete_rule() {
@@ -240,7 +268,7 @@ do_delete_rule() {
 do_enable_boot() {
     if [ ! -f "$NFT_CONFIG_FILE" ]; then
         echo "警告: 配置文件 $NFT_CONFIG_FILE 不存在。"
-        echo "      请先运行 '4. 保存规则到系统配置'。"
+        echo "      请先运行 '7. 保存规则到系统配置'。"
         return 1
     fi
     echo "正在启用 'nftables.service' (开机自动加载 $NFT_CONFIG_FILE)..."
@@ -293,7 +321,7 @@ show_status_header() {
     echo "========================================================"
     echo " 当前时间: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "========================================================"
-    echo "                Nftables 转发管理面板 (v2.0)"
+    echo "                Nftables 转发管理面板 (v2.1)"
     echo "========================================================"
     echo -e " 核心转发: $fwd_status   | 服务状态: $service_status   | 开机自启: $enable_status"
     echo -e " 配置规则: \e[33m$dnat_count\e[0m 条 DNAT 规则 (来自 $DNAT_RULES_FILE)"
