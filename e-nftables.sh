@@ -1,54 +1,39 @@
 #!/bin/bash
 
 # =================================================================
-#           Nftables 转发 (NAT 网关) 管理脚本
+#           Nftables 转发 (NAT 网关) TUI 管理面板
 # =================================================================
 #
 # 功能:
-#   使用参数管理 nftables 转发规则和持久化。
-#
-# 用法:
-#   sudo ./manage_forwarding.sh [start|stop|restart|status|save|enable-boot|disable-boot]
+#   提供一个类似 E-Gost 面板的 TUI 菜单，用于管理 nftables
+#   转发、NAT 和持久化。
 #
 # =================================================================
 
 # --- [ 1. 配置变量 ] (请根据您的环境修改) ---
 
-# 外部(公网)接口 (例如: eth0, enp1s0)
+# 外部(公网)接口
 EXT_IF="eth0"
-
-# 内部(局域网)接口 (例如: eth1, enp2s0)
+# 内部(局域网)接口
 INT_IF="eth1"
-
-# 内部(局域网)网段 (例如: 192.168.1.0/24)
+# 内部(局域网)网段
 INT_NET="192.168.1.0/24"
-
 # 允许外部访问服务器的 SSH 端口
 SSH_PORT="22"
-
 # Nftables 配置文件路径
 NFT_CONFIG_FILE="/etc/nftables.conf"
 
-
 # --- [ 2. 端口转发 (DNAT) 规则 ] ---
-#
 #   格式: "协议:外部端口:内部IP:内部端口"
-#   示例: "tcp:80:192.168.1.100:80" (将公网80端口转发到内网 1.100 的 80)
-#
-#   在此处添加您的 DNAT 规则:
 declare -a DNAT_RULES=(
     # "tcp:80:192.168.1.100:80"
     # "tcp:443:192.168.1.100:443"
-    # "udp:53:192.168.1.53:53"
 )
 
 
 # =================================================================
-#                 [ 脚本核心逻辑 - 请勿修改下方内容 ]
+#                 [ 脚本核心功能 - 请勿修改下方内容 ]
 # =================================================================
-
-# 启用严格模式
-set -e
 
 # 检查 root 权限
 if [ "$(id -u)" -ne 0 ]; then
@@ -61,59 +46,37 @@ fi
 # [ 启动/应用规则 ]
 do_start() {
     echo "1. 启用内核IP转发..."
-    sysctl -w net.ipv4.ip_forward=1
-    sysctl -w net.ipv6.conf.all.forwarding=1
-    sysctl -w net.ipv4.conf.all.accept_redirects=0
-    sysctl -w net.ipv4.conf.all.send_redirects=0
-
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null
+    sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null
     echo "2. 清空当前所有 Nftables 规则..."
     nft flush ruleset
-
     echo "3. 创建 Tables 和 Chains..."
-    # 'inet filter' table (IPv4/IPv6 防火墙)
     nft add table inet filter
     nft add chain inet filter input { type filter hook input priority 0\; policy drop\; }
     nft add chain inet filter forward { type filter hook forward priority 0\; policy drop\; }
     nft add chain inet filter output { type filter hook output priority 0\; policy accept\; }
-
-    # 'ip nat' table (仅 IPv4 NAT)
     nft add table ip nat
     nft add chain ip nat prerouting { type nat hook prerouting priority 0\; }
     nft add chain ip nat postrouting { type nat hook postrouting priority 100\; }
-
-    echo "4. 添加 'filter' (Input) 规则 (保护服务器)..."
+    echo "4. 添加 'filter' 防火墙规则..."
     nft add rule inet filter input iifname "lo" accept
     nft add rule inet filter input ct state related,established accept
     nft add rule inet filter input ip protocol icmp accept
     nft add rule inet filter input ip6 nexthdr icmpv6 accept
     nft add rule inet filter input tcp dport $SSH_PORT accept
-
-    echo "5. 添加 'filter' (Forward) 规则 (控制转发)..."
     nft add rule inet filter forward ct state related,established accept
     nft add rule inet filter forward iifname $INT_IF oifname $EXT_IF accept
-
-    echo "6. 添加 'nat' (SNAT/Masquerade) 规则..."
+    echo "5. 添加 'nat' (SNAT/Masquerade) 规则..."
     nft add rule ip nat postrouting oifname $EXT_IF ip saddr $INT_NET masquerade
-
-    echo "7. 添加 'nat' (DNAT/端口转发) 规则..."
-    if [ ${#DNAT_RULES[@]} -eq 0 ]; then
-        echo "   (未配置 DNAT 规则，跳过)"
-    else
-        for rule in "${DNAT_RULES[@]}"; do
-            IFS=':' read -r proto ext_port int_ip int_port <<< "$rule"
-            echo "   -> 转发 $proto 端口 $ext_port 至 $int_ip:$int_port"
-            
-            # 1. 添加 DNAT 规则
-            nft add rule ip nat prerouting iifname $EXT_IF $proto dport $ext_port dnat to $int_ip:$int_port
-            
-            # 2. (重要) 在 filter:forward 链中放行此流量
-            nft add rule inet filter forward iifname $EXT_IF oifname $INT_IF ip daddr $int_ip $proto dport $int_port accept
-        done
-    fi
-
+    echo "6. 添加 'nat' (DNAT/端口转发) 规则..."
+    for rule in "${DNAT_RULES[@]}"; do
+        IFS=':' read -r proto ext_port int_ip int_port <<< "$rule"
+        echo "   -> 转发 $proto 端口 $ext_port 至 $int_ip:$int_port"
+        nft add rule ip nat prerouting iifname $EXT_IF $proto dport $ext_port dnat to $int_ip:$int_port
+        nft add rule inet filter forward iifname $EXT_IF oifname $INT_IF ip daddr $int_ip $proto dport $int_port accept
+    done
     echo "---"
     echo "✅ Nftables 转发网关已启动."
-    echo "---"
 }
 
 # [ 停止/清空规则 ]
@@ -121,13 +84,10 @@ do_stop() {
     echo "停止 Nftables 网关并清空所有规则..."
     nft flush ruleset
     echo "✅ 所有规则已清空."
-    # 注意: 内核转发 (ip_forward) 保持不变，以免影响其他服务。
-    # 如果需要，可以取消下一行的注释来禁用它：
-    # sysctl -w net.ipv4.ip_forward=0
 }
 
-# [ 查看状态 ]
-do_status() {
+# [ 查看当前规则 (详细) ]
+do_status_detail() {
     echo "--- [ 内核转发状态 ] ---"
     sysctl net.ipv4.ip_forward net.ipv6.conf.all.forwarding
     echo ""
@@ -139,14 +99,10 @@ do_status() {
 # [ 保存规则 ]
 do_save() {
     echo "正在保存当前规则集到 $NFT_CONFIG_FILE..."
-    # 确保目录存在
     mkdir -p "$(dirname "$NFT_CONFIG_FILE")"
-    
-    # 导出规则
     if nft list ruleset > "$NFT_CONFIG_FILE"; then
         chmod 600 "$NFT_CONFIG_FILE"
         echo "✅ 规则已成功保存到 $NFT_CONFIG_FILE"
-        echo "   (要使其开机生效, 请运行: $0 enable-boot)"
     else
         echo "❌ 保存失败! 无法写入 $NFT_CONFIG_FILE"
     fi
@@ -156,8 +112,8 @@ do_save() {
 do_enable_boot() {
     if [ ! -f "$NFT_CONFIG_FILE" ]; then
         echo "警告: 配置文件 $NFT_CONFIG_FILE 不存在。"
-        echo "      请先运行 '$0 save' 保存规则。"
-        exit 1
+        echo "      请先运行 '5. 保存规则'。"
+        return 1
     fi
     echo "正在启用 'nftables.service' (开机自动加载 $NFT_CONFIG_FILE)..."
     systemctl enable nftables.service
@@ -171,57 +127,119 @@ do_disable_boot() {
     echo "✅ 'nftables.service' 已禁用."
 }
 
-# [ 显示用法 ]
-usage() {
-    echo "用法: $0 [start|stop|restart|status|save|enable-boot|disable-boot]"
-    echo "  start         : 应用脚本中定义的 NAT 转发规则"
-    echo "  stop          : 清空所有 Nftables 规则"
-    echo "  restart       : 停止 (清空) 并重新启动规则"
-    echo "  status        : 显示内核转发状态和当前 Nftables 规则"
-    echo "  save          : 将当前生效的规则保存到 $NFT_CONFIG_FILE"
-    echo "  enable-boot   : 启用 nftables 服务, 使其开机自动加载 $NFT_CONFIG_FILE"
-    echo "  disable-boot  : 禁用 nftables 服务开机自启"
+
+# ----------------- [ TUI 界面函数 ] -----------------
+
+# [ 1. 显示状态顶栏 ]
+show_status_header() {
+    clear
+    
+    # 获取内核转发状态
+    local fwd_status
+    if [[ "$(sysctl -n net.ipv4.ip_forward)" == "1" ]]; then
+        fwd_status="\e[32m已开启\e[0m" # 绿色
+    else
+        fwd_status="\e[31m已关闭\e[0m" # 红色
+    fi
+
+    # 获取 Nftables 服务状态
+    local service_status
+    if systemctl is-active --quiet nftables.service; then
+        service_status="\e[32m运行中\e[0m" # 绿色
+    else
+        service_status="\e[31m已停止\e[0m" # 红色
+    fi
+
+    # 获取开机自启状态
+    local enable_status
+    if systemctl is-enabled --quiet nftables.service; then
+        enable_status="\e[32m已启用\e[0m" # 绿色
+    else
+        enable_status="\e[31m已禁用\e[0m" # 红色
+    fi
+
+    # 获取 DNAT 规则数
+    local dnat_count="${#DNAT_RULES[@]}"
+
+    echo "========================================================"
+    echo " 当前时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "========================================================"
+    echo "                Nftables 转发管理面板"
+    echo "========================================================"
+    echo -e " 核心转发: $fwd_status   | 服务状态: $service_status   | 开机自启: $enable_status"
+    echo " 配置规则: $dnat_count 条 DNAT 规则"
+    echo "========================================================"
 }
 
-# ----------------- [ 3. 参数解析器 ] -----------------
+# [ 2. 显示主菜单 ]
+show_main_menu() {
+    echo " 1. 启动转发 (应用配置)"
+    echo " 2. 停止转发 (清空规则)"
+    echo " 3. 重启转发"
+    echo "--------------------------------------------------------"
+    echo " 4. 查看当前规则 (详细)"
+    echo " 5. 保存规则到 $NFT_CONFIG_FILE"
+    echo " 6. 启用服务 (开机自启)"
+    echo " 7. 禁用服务 (取消自启)"
+    echo "========================================================"
+    echo " 00. 退出"
+    echo "--------------------------------------------------------"
+}
 
-# 检查是否提供了参数
-if [ $# -eq 0 ]; then
-    usage
-    exit 1
-fi
+# ----------------- [ 3. 主循环 ] -----------------
+main_loop() {
+    while true; do
+        show_status_header
+        show_main_menu
+        read -p "请选择操作 [1-7, 00]: " choice
 
-ACTION="$1"
+        # 清除状态顶栏和菜单，准备显示操作输出
+        clear
+        echo "========================================================"
+        echo "                 执行操作: $choice"
+        echo "========================================================"
+        
+        case "$choice" in
+            1)
+                do_start
+                ;;
+            2)
+                do_stop
+                ;;
+            3)
+                echo "--- 正在停止... ---"
+                do_stop
+                echo ""
+                echo "--- 正在启动... ---"
+                do_start
+                echo "✅ 重启完成."
+                ;;
+            4)
+                do_status_detail
+                ;;
+            5)
+                do_save
+                ;;
+            6)
+                do_enable_boot
+                ;;
+            7)
+                do_disable_boot
+                ;;
+            00)
+                echo "退出脚本。"
+                echo "========================================================"
+                exit 0
+                ;;
+            *)
+                echo -e "\e[31m错误: 无效输入 '$choice'。\e[0m"
+                ;;
+        esac
 
-case "$ACTION" in
-    start)
-        do_start
-        ;;
-    stop)
-        do_stop
-        ;;
-    restart)
-        do_stop
-        do_start
-        ;;
-    status)
-        do_status
-        ;;
-    save)
-        do_save
-        ;;
-    enable-boot)
-        do_enable_boot
-        ;;
-    disable-boot)
-        do_disable_boot
-        ;;
-    help|--help|-h)
-        usage
-        ;;
-    *)
-        echo "错误: 未知操作 '$ACTION'"
-        usage
-        exit 1
-        ;;
-esac
+        echo "========================================================"
+        read -p "按 [Enter] 键返回主菜单..." -r
+    done
+}
+
+# 启动主循环
+main_loop
